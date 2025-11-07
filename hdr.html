@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <title>WebGPU OKLCH</title>
+  <style>
+    html,
+    body {
+      background: #111;
+      margin: 10px;
+      color: #ddd;
+      font: 14px/1.4 system-ui, sans-serif;
+    }
+
+    html {
+      max-width: 800px;
+    }
+
+    #showColor {
+      width: 50px;
+      height: 50px;
+      margin-bottom: 10px;
+    }
+
+    #controls {
+      display: grid;
+      grid-template-columns: max-content max-content max-content;
+    }
+
+    #canvases {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: max-content max-content;
+      gap: 10px;
+    }
+
+    canvas {
+      width: 300px;
+      height: 300px;
+    }
+
+    input[type="range"] {
+      width: 240px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div><strong>WebGPU OKLCH</strong></div>
+  </header>
+  <pre id="hdrStatus">Detecting…</pre>
+  <div id="showColor"></div>
+  <div id="controls">
+    <label>L:</label>
+    <input id="L" type="range" min="0.0" max="1.0" step="0.01" value="0.7" />
+    <span id="LReadout">1.2</span>
+
+    <label>C:</label>
+    <input id="C" type="range" min="0.0" max="0.47" step="0.01" value="0.2" />
+    <span id="CReadout">1.2</span>
+
+    <label>H:</label>
+    <input id="H" type="range" min="0.0" max="360.0" step="0.1" value="30.0" />
+    <span id="HReadout">1.2</span>
+  </div>
+  <div id="canvases">
+    <canvas id="lightness"></canvas>
+    <canvas id="chroma"></canvas>
+    <div></div>
+    <canvas id="hue"></canvas>
+  </div>
+
+  <script type="module">
+    const vertexWGSL = `
+@vertex
+fn v_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4f {
+  // Fullscreen triangle (no buffers)
+  var pos = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f( 3.0, -1.0),
+    vec2f(-1.0,  3.0)
+  );
+  return vec4f(pos[vid], 0.0, 1.0);
+}
+`;
+
+    const fragmentWGSL = `
+struct Params { L: f32, C: f32, H: f32, w: f32, h: f32 };
+@group(0) @binding(0) var<uniform> params : Params;
+
+fn gamma(x: f32) -> f32 {
+    let a = 0.055;
+    return select(
+        x * 12.92,
+        (1.0 + a) * pow(x, 1.0 / 2.4) - a,
+        x > 0.0031308
+    );
+}
+
+fn LchToP3(L: f32, C: f32, H: f32) -> vec3f {
+  let pi = 3.14159;
+  let a = C*cos(H*pi/180.0);
+  let b = C*sin(H*pi/180.0);
+  let p =  0.396338 *a + 0.215804 *b + L;
+  let q = -0.105561 *a - 0.0638542*b + L;
+  let e = -0.0894842*a - 1.29149  *b + L; 
+  let P = p*p*p;
+  let Q = q*q*q;
+  let E = e*e*e;
+  let X =  1.22701  *P - 0.5578  *Q + 0.281256 *E;
+  let Y = -0.0405802*P + 1.11226 *Q - 0.0716767*E;
+  let Z = -0.0763813*P - 0.421482*Q + 1.58616  *E;
+  let R =  2.4935   *X - 0.931384 *Y - 0.402711 *Z;
+  let G = -0.829489 *X + 1.76266  *Y + 0.0236247*Z;
+  let B =  0.0358458*X - 0.0761724*Y + 0.956885 *Z;
+  return vec3f(gamma(R), gamma(G), gamma(B));
+}
+
+fn output(L: f32, C: f32, H: f32) -> vec4f {
+  let p3 = LchToP3(L, C, H);
+  let max = 1.15;
+  if ((p3.r > 0.99 || p3.g > 0.99 || p3.b > 0.99) && (p3.r < 1.0 && p3.g < 1.0 && p3.b < 1.0)) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
+  if (p3.r < 0.0 || p3.r > max || p3.g < 0.0 || p3.g > max || p3.b < 0.0 || p3.b > max) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
+  return vec4f(p3, 1.0);
+}
+
+fn input(coord: vec4f) -> vec2f {
+  let resolution = vec2f(params.w, params.h);
+  let uv = (coord.xy / resolution);
+  return uv;
+}
+
+@fragment
+fn lightness(@builtin(position) coord: vec4f) -> @location(0) vec4f {
+  let uv = input(coord);
+  return output(uv.x, 1.0 - uv.y, params.H);
+}
+
+@fragment
+fn chroma(@builtin(position) coord: vec4f) -> @location(0) vec4f {
+  let uv = input(coord);
+  return output(params.L, 1.0 - uv.y, uv.x*360.0);
+}
+
+@fragment
+fn hue(@builtin(position) coord: vec4f) -> @location(0) vec4f {
+  let uv = input(coord);
+  return output(1.0 - uv.y, params.C, uv.x*360.0);
+}
+`;
+
+    const ui = {
+      L: document.getElementById('L'),
+      C: document.getElementById('C'),
+      H: document.getElementById('H'),
+      LReadout: document.getElementById('LReadout'),
+      CReadout: document.getElementById('CReadout'),
+      HReadout: document.getElementById('HReadout'),
+      hdrStatus: document.getElementById('hdrStatus'),
+      showColor: document.getElementById('showColor'),
+    };
+    function updateColor() {
+      ui.LReadout.textContent = Number(ui.L.value).toFixed(2);
+      ui.CReadout.textContent = Number(ui.C.value).toFixed(2);
+      ui.HReadout.textContent = Number(ui.H.value).toFixed(1);
+      ui.showColor.style.backgroundColor = `oklch(${ui.L.value} ${ui.C.value} ${ui.H.value})`;
+    }
+    ui.L.addEventListener('input', updateColor);
+    ui.C.addEventListener('input', updateColor);
+    ui.H.addEventListener('input', updateColor);
+    updateColor();
+
+    async function init(name) {
+      const canvas = document.getElementById(name);
+      const context = canvas.getContext('webgpu');
+
+      if (!('gpu' in navigator) || !context) {
+        ui.hdrStatus.textContent = 'WebGPU not available';
+        throw new Error('WebGPU not available in this browser.');
+      }
+
+      let device, pipeline, uniformBuf, bindGroup = null;
+
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        ui.hdrStatus.textContent = 'No GPU adapter';
+        throw new Error('No GPU adapter');
+      }
+      device = await adapter.requestDevice();
+
+      const moduleVS = device.createShaderModule({ code: vertexWGSL });
+      const moduleFS = device.createShaderModule({ code: fragmentWGSL });
+
+      uniformBuf = device.createBuffer({
+        size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
+      pipeline = device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module: moduleVS, entryPoint: 'v_main' },
+        fragment: {
+          module: moduleFS,
+          entryPoint: name,
+          targets: [{ format: 'rgba16float' }],
+        },
+        primitive: { topology: 'triangle-list' },
+      });
+
+      bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+      });
+
+      const renderer = {
+        canvas,
+        context,
+        device,
+        uniformBuf,
+        pipeline,
+        bindGroup,
+      };
+
+      const config = {
+        device: renderer.device,
+        format: 'rgba16float',
+        alphaMode: 'opaque',
+        colorSpace: 'display-p3',
+        toneMapping: { mode: 'extended' },
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      };
+      renderer.context.configure(config);
+      updateHdrBadge(renderer);
+      onResize(renderer);
+      window.addEventListener('resize', () => onResize(renderer));
+      requestAnimationFrame(() => frame(renderer));
+    }
+
+    function updateHdrBadge(renderer) {
+      const cfg = renderer.context.getConfiguration?.();
+      const tone = cfg?.toneMapping?.mode ?? 'unknown';
+      const fmt = cfg?.format ?? 'unknown';
+      const colorSpace = cfg?.colorSpace ?? 'unknown';
+
+      const mq = window.matchMedia('(dynamic-range: high)').matches ? 'high' :
+        window.matchMedia('(dynamic-range: standard)').matches ? 'standard' : 'unknown';
+
+      ui.hdrStatus.textContent =
+        `canvas: ${fmt}\ntone: ${tone}\ncolorSpace: ${colorSpace}\nmediaQuery: ${mq}\n`;
+    }
+
+    function onResize(renderer) {
+      const dpr = window.devicePixelRatio;
+      const rect = renderer.canvas.getBoundingClientRect();
+      renderer.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      renderer.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    }
+
+    function frame(renderer) {
+      const L = parseFloat(ui.L.value);
+      const C = parseFloat(ui.C.value);
+      const H = parseFloat(ui.H.value);
+      const w = renderer.canvas.width;
+      const h = renderer.canvas.height;
+      const data = new Float32Array([L, C, H, w, h]);
+      renderer.device.queue.writeBuffer(renderer.uniformBuf, 0, data.buffer, data.byteOffset, data.byteLength);
+
+      const texture = renderer.context.getCurrentTexture();
+      const view = texture.createView();
+
+      const encoder = renderer.device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view,
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp: 'clear',
+          storeOp: 'store',
+        }],
+      });
+      pass.setPipeline(renderer.pipeline);
+      pass.setBindGroup(0, renderer.bindGroup);
+      pass.draw(3, 1, 0, 0);
+      pass.end();
+
+      renderer.device.queue.submit([encoder.finish()]);
+      requestAnimationFrame(() => frame(renderer));
+    }
+
+    function onerr(err) {
+      console.error(err);
+      ui.hdrStatus.textContent = 'Initialization failed';
+    }
+
+    init('lightness').catch(onerr);
+    init('chroma').catch(onerr);
+    init('hue').catch(onerr);
+  </script>
+</body>
+
+</html>
