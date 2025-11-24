@@ -54,7 +54,7 @@
   <div id="showColor"></div>
   <div id="controls">
     <label>L:</label>
-    <input id="L" type="range" min="0.0" max="1.0" step="0.01" value="0.7" />
+    <input id="L" type="range" min="0.0" max="1.15" step="0.01" value="0.7" />
     <span id="LReadout">1.2</span>
 
     <label>C:</label>
@@ -120,7 +120,7 @@ fn LchToP3(L: f32, C: f32, H: f32) -> vec3f {
 
 fn output(L: f32, C: f32, H: f32) -> vec4f {
   let p3 = LchToP3(L, C, H);
-  let max = 1.15;
+  let max = 1.202;
   if ((p3.r > 0.99 || p3.g > 0.99 || p3.b > 0.99) && (p3.r < 1.0 && p3.g < 1.0 && p3.b < 1.0)) {
     return vec4f(0.0, 0.0, 0.0, 1.0);
   }
@@ -139,7 +139,7 @@ fn input(coord: vec4f) -> vec2f {
 @fragment
 fn lightness(@builtin(position) coord: vec4f) -> @location(0) vec4f {
   let uv = input(coord);
-  return output(uv.x, 1.0 - uv.y, params.H);
+  return output(uv.x*1.15, 1.0 - uv.y, params.H);
 }
 
 @fragment
@@ -151,7 +151,7 @@ fn chroma(@builtin(position) coord: vec4f) -> @location(0) vec4f {
 @fragment
 fn hue(@builtin(position) coord: vec4f) -> @location(0) vec4f {
   let uv = input(coord);
-  return output(1.0 - uv.y, params.C, uv.x*360.0);
+  return output((1.0 - uv.y)*1.15, params.C, uv.x*360.0);
 }
 `;
 
